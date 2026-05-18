@@ -1,0 +1,28 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Data
+data/
+datasets/
+Toronto3D/
+
+# 3D fileovi
+*.ply
+*.pcd
+*.obj
+
+# arhive
+*.zip
+*.7z
+*.rar
+
+# ML modeli
+*.pt
+*.pth
+*.onnx
+
+# OS
+.DS_Store
+Thumbs.db

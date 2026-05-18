@@ -1,0 +1,25 @@
+# Minimal config: RandLA-Net trained ONLY on Toronto-3D.
+# Use this to get a first working model; add other datasets later by
+# switching to randlanet.yaml.
+
+num_classes: 6
+in_feat_dim: 5              # [R, G, B, intensity, height-above-ground]
+batch_size: 4
+epochs: 50                  # Toronto-3D alone converges faster (fewer samples)
+lr: 0.001
+num_workers: 2
+out_dir: ./runs/toronto3d_v1
+class_weights: [0.0, 1.0, 1.5, 2.0, 1.0, 1.5]
+crop_points: 65536
+voxel: 0.03
+augment: true
+modality_dropout: true
+
+# Toronto-3D has only 4 huge tiles. Each __getitem__ returns a random crop
+# inside a tile, so we oversample each file many times per epoch:
+steps_per_epoch: 500
+
+datasets:
+  toronto3d:
+    root: C:\Users\Ivan\Desktop\Toronto_3D\Toronto_3D    # <-- EDIT: apsolutna putanja do tvojih L00x.ply
+    weight: 1.0

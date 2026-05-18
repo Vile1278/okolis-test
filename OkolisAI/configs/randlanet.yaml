@@ -1,0 +1,34 @@
+# RandLA-Net training config
+num_classes: 6
+in_feat_dim: 5            # [R, G, B, intensity, height-above-ground]
+batch_size: 4
+epochs: 100
+lr: 0.001
+num_workers: 4
+out_dir: ./runs/randlanet_v1
+# class weights (unlabeled=0 is ignored anyway). Boost walls/roads a bit
+# because they're the product-critical classes.
+class_weights: [0.0, 1.0, 1.5, 2.0, 1.0, 1.5]
+crop_points: 65536
+voxel: 0.03
+augment: true
+modality_dropout: true
+
+# If your epoch takes too long, cap how many crops to sample per epoch:
+# steps_per_epoch: 2000
+
+# Dataset roots (fill in absolute paths on your Windows box)
+datasets:
+  toronto3d:
+    root: D:/data/Toronto3D
+    weight: 1.0
+  semantickitti:
+    root: D:/data/SemanticKITTI      # folder containing dataset/sequences/..
+    weight: 0.5
+  botanicgarden:
+    root: D:/data/BotanicGarden/semantic_clouds
+    weight: 1.0
+    label_field: scalar_class        # change if your release uses "label"
+  custom:
+    root: ./data/custom_iphone
+    weight: 3.0                      # upweight on-distribution iPhone scans

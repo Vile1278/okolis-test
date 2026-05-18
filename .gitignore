@@ -1,0 +1,22 @@
+# Model weights (too large for GitHub)
+*.pt
+
+# Point cloud data
+*.ply
+
+# Nested git from OkolisAI copy
+OkolisAI/.git/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

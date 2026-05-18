@@ -1,0 +1,21 @@
+datasets:
+  toronto3d:
+    root: C:/Users/Ivan/Desktop/Toronto_3D/Toronto_3D
+    weight: 1.0
+  semantickitti:
+    root: C:/Users/Ivan/Desktop/SemanticKITTI
+    weight: 0.7
+
+crop_points: 65536
+voxel: 0.03
+augment: true
+modality_dropout: true
+steps_per_epoch: 500
+
+batch_size: 4
+num_classes: 8
+in_feat_dim: 5
+lr: 0.001
+epochs: 100
+out_dir: runs/rtx_a4000_full
+num_workers: 0
