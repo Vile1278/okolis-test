@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ── Config ──────────────────────────────────────────────────────────────
 PLY_PATH   = "kod_Tina.ply"
 WEIGHTS    = "PTv3(1).pt"
-VOXEL      = 0.05          # downsample voxel size (metres) — 5cm good for iPhone
+VOXEL      = 0.02          # downsample voxel size (metres) — 2cm matches training
 EXPORT_PLY = "kod_Tina_segmented.ply"   # coloured output
 
 CLASS_NAMES = [
