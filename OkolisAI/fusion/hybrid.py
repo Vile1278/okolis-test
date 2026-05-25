@@ -60,9 +60,17 @@ def _color_prior(rgb: np.ndarray, indices: np.ndarray) -> dict[str, float]:
         priors["building"] = priors.get("building", 1.0) * 1.3
         priors["vegetation"] = priors.get("vegetation", 1.0) * 0.5
 
-    # Brown/dark → ground hint
-    if mean_r > mean_g and mean_r > mean_b and brightness < 0.4:
-        priors["ground"] = priors.get("ground", 1.0) * 1.3
+    # Brown/warm-toned → ground (not road). Dirt, earth, soil.
+    if mean_r > mean_g and mean_r > mean_b and brightness < 0.5:
+        warmth = mean_r - mean_b  # how warm/earthy the color is
+        priors["ground"] = priors.get("ground", 1.0) * (1.0 + warmth * 4.0)
+        priors["road"] = priors.get("road", 1.0) * max(0.4, 1.0 - warmth * 3.0)
+
+    # Neutral gray → road/sidewalk (asphalt), not ground
+    if spread < 0.08 and 0.2 < brightness < 0.5:
+        priors["road"] = priors.get("road", 1.0) * 1.5
+        priors["sidewalk"] = priors.get("sidewalk", 1.0) * 1.3
+        priors["ground"] = priors.get("ground", 1.0) * 0.7
 
     return priors
 
@@ -109,10 +117,12 @@ def _apply_geom_prior(seg: Segment, scores: np.ndarray,
     if seg.kind == "ground":
         if f.verticality < 0.5:
             # Ground extractor says ground + not vertical → believe it.
-            # Let ML decide between ground/road/sidewalk.
-            s[IDX["ground"]] *= 2.0
-            s[IDX["road"]] *= 1.5
-            s[IDX["sidewalk"]] *= 1.5
+            # iPhone LiDAR scans are typically yards/gardens, not roads.
+            # The ML model over-predicts "road" because it was trained on
+            # urban datasets — so we give ground a strong advantage here.
+            s[IDX["ground"]] *= 4.0
+            s[IDX["road"]] *= 1.0       # neutral — let ML confidence decide
+            s[IDX["sidewalk"]] *= 1.0    # neutral
             s[IDX["building"]] *= 0.05
             s[IDX["fence"]] *= 0.05
             s[IDX["vehicle"]] *= 0.05
