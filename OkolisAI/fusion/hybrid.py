@@ -1,12 +1,16 @@
 """Hybrid geometry + ML label assignment at the segment level.
 
 Geometry priors tuned for iPhone LiDAR outdoor scans.
-Key principle: geometry OVERRIDES ML when shape is unambiguous:
-  - vertical + planar + wide  → building (never ground)
-  - horizontal + flat         → ground/road/sidewalk
-  - non-planar + spread       → vegetation
-  - compact + low + non-planar → vehicle
-All rules use coordinate-system-independent features (no absolute Z).
+Key principle: geometry NUDGES ML predictions, doesn't override them.
+Hard vetoes (×0.0) only when physics makes a class impossible.
+Multipliers are moderate (max ~3×) and don't compound excessively.
+
+Rules:
+  - vertical + planar + wide  → building boost
+  - horizontal + flat         → ground/road/sidewalk boost
+  - non-planar + spread       → vegetation boost
+  - compact + low + non-planar → vehicle boost
+  - ground-extracted segments  → trust the extractor
 """
 from __future__ import annotations
 from typing import Iterable
@@ -45,16 +49,20 @@ def _color_prior(rgb: np.ndarray, indices: np.ndarray) -> dict[str, float]:
     # Green-dominant → vegetation
     if mean_g > mean_r and mean_g > mean_b and mean_g > 0.35:
         greenness = (mean_g - max(mean_r, mean_b))
-        priors["vegetation"] = 1.0 + greenness * 8.0
-        priors["building"] = max(0.2, 1.0 - greenness * 5.0)
-        priors["vehicle"] = max(0.3, 1.0 - greenness * 3.0)
+        priors["vegetation"] = 1.0 + greenness * 5.0
+        priors["building"] = max(0.4, 1.0 - greenness * 3.0)
+        priors["vehicle"] = max(0.5, 1.0 - greenness * 2.0)
 
-    # Gray/beige (concrete, plaster) → building material
+    # Gray/beige (concrete, plaster) → mild building boost
     spread = max(abs(mean_r - mean_g), abs(mean_g - mean_b), abs(mean_r - mean_b))
     brightness = (mean_r + mean_g + mean_b) / 3.0
     if spread < 0.12 and brightness > 0.35:
-        priors["building"] = priors.get("building", 1.0) * 1.8
-        priors["vegetation"] = priors.get("vegetation", 1.0) * 0.3
+        priors["building"] = priors.get("building", 1.0) * 1.3
+        priors["vegetation"] = priors.get("vegetation", 1.0) * 0.5
+
+    # Brown/dark → ground hint
+    if mean_r > mean_g and mean_r > mean_b and brightness < 0.4:
+        priors["ground"] = priors.get("ground", 1.0) * 1.3
 
     return priors
 
@@ -67,7 +75,6 @@ def _apply_geom_prior(seg: Segment, scores: np.ndarray,
 
     horiz_extent = max(f.extent[0], f.extent[1])
     min_horiz    = min(f.extent[0], f.extent[1])
-    area_proxy   = float(f.extent[0] * f.extent[1])
 
     # ── Color priors ────────────────────────────────────────────────
     if rgb is not None:
@@ -77,68 +84,78 @@ def _apply_geom_prior(seg: Segment, scores: np.ndarray,
                 s[IDX[cls_name]] *= mult
 
     # ══════════════════════════════════════════════════════════════════
-    # CORE RULES — physics-based, apply to ALL segment kinds.
+    # CORE RULES — physics-based, apply to non-ground segment kinds.
+    # Ground segments are handled separately (trust the extractor).
     # ══════════════════════════════════════════════════════════════════
 
-    # Rule 1: Vertical things cannot be ground/road/sidewalk.
-    if f.verticality > 0.4 and f.height_range > 0.5:
-        s[IDX["ground"]] *= 0.05
-        s[IDX["road"]] *= 0.05
-        s[IDX["sidewalk"]] *= 0.05
+    if seg.kind != "ground":
+        # Rule 1: Vertical things cannot be ground/road/sidewalk.
+        if f.verticality > 0.5 and f.height_range > 0.8:
+            s[IDX["ground"]] *= 0.1
+            s[IDX["road"]] *= 0.1
+            s[IDX["sidewalk"]] *= 0.1
 
-    # Rule 1b: Tall things (>1.5m height range) cannot be ground, even at
-    # moderate verticality. Ground is flat by definition.
-    if f.height_range > 1.5:
-        s[IDX["ground"]] *= 0.1
-        s[IDX["road"]] *= 0.1
+        # Rule 2: Very tall segments (>3m) are not vehicles.
+        if f.height_range > 3.0:
+            s[IDX["vehicle"]] *= 0.1
 
-    # Rule 2: Very tall segments (>3m) are not vehicles (cars are ~1.5m tall).
-    if f.height_range > 3.0:
-        s[IDX["vehicle"]] *= 0.05
+        # Rule 3: Very wide planar segments are not vehicles.
+        if f.planarity > 0.5 and horiz_extent > 4.0:
+            s[IDX["vehicle"]] *= 0.1
 
-    # Rule 3: Very wide planar segments are not vehicles.
-    if f.planarity > 0.5 and horiz_extent > 4.0:
-        s[IDX["vehicle"]] *= 0.05
+    # ── Ground-origin segments ──────────────────────────────────────
+    # Trust the ground extractor. It already handles slopes, so
+    # height_range can be large on hilly terrain — that's OK.
+    if seg.kind == "ground":
+        if f.verticality < 0.5:
+            # Ground extractor says ground + not vertical → believe it.
+            # Let ML decide between ground/road/sidewalk.
+            s[IDX["ground"]] *= 2.0
+            s[IDX["road"]] *= 1.5
+            s[IDX["sidewalk"]] *= 1.5
+            s[IDX["building"]] *= 0.05
+            s[IDX["fence"]] *= 0.05
+            s[IDX["vehicle"]] *= 0.05
+            s[IDX["unlabeled"]] *= 0.2
+            # Vegetation can grow on ground — mild suppress only
+            s[IDX["vegetation"]] *= 0.5
+        else:
+            # "Ground" segment but actually vertical — extractor error.
+            # Don't force ground; let ML decide, mild building boost.
+            s[IDX["building"]] *= 1.5
+            s[IDX["ground"]] *= 0.5
 
     # ── Planes ──────────────────────────────────────────────────────
     if seg.kind == "plane":
 
         # Planes are flat surfaces — vehicles are NOT planar.
-        s[IDX["vehicle"]] *= 0.1
+        s[IDX["vehicle"]] *= 0.2
 
         if f.verticality > 0.6:
-            # Large vertical planar → BUILDING
+            # Vertical plane → building or fence, not ground
+            s[IDX["ground"]] *= 0.05
+            s[IDX["road"]] *= 0.05
+            s[IDX["sidewalk"]] *= 0.05
+
+            # Large vertical planar → building
             if f.planarity > 0.3 and horiz_extent > 1.0:
-                s[IDX["building"]] *= 4.0
-                s[IDX["vegetation"]] *= 0.2
-                s[IDX["ground"]] *= 0.0
-                s[IDX["road"]] *= 0.0
-                s[IDX["sidewalk"]] *= 0.0
-
-            # Very large wall
-            if f.planarity > 0.3 and (horiz_extent > 3.0 or area_proxy > 2.0):
-                s[IDX["building"]] *= 5.0
-                s[IDX["fence"]] *= 0.3
-
-            # Medium vertical, short → fence
-            if f.planarity > 0.3 and horiz_extent > 0.5 and f.height_range < 2.0:
-                s[IDX["fence"]] *= 1.5
+                s[IDX["building"]] *= 3.0
+                s[IDX["vegetation"]] *= 0.3
 
             # Tall vertical (>2.5m) → building, not fence
             if f.height_range > 2.5 and f.planarity > 0.3:
-                s[IDX["building"]] *= 2.0
-                s[IDX["fence"]] *= 0.3
+                s[IDX["building"]] *= 1.5
+                s[IDX["fence"]] *= 0.4
 
-            # Any vertical plane: suppress horizontal classes
-            s[IDX["ground"]] *= 0.0
-            s[IDX["road"]] *= 0.0
-            s[IDX["sidewalk"]] *= 0.0
+            # Short vertical (<2m) → could be fence
+            if f.height_range < 2.0 and f.planarity > 0.3 and horiz_extent > 0.5:
+                s[IDX["fence"]] *= 1.5
 
-        # Horizontal planes
+        # Horizontal planes → ground/road/sidewalk
         if f.verticality < 0.3:
-            s[IDX["building"]] *= 0.0
-            s[IDX["fence"]] *= 0.0
-            s[IDX["vehicle"]] *= 0.0
+            s[IDX["building"]] *= 0.1
+            s[IDX["fence"]] *= 0.1
+            s[IDX["vehicle"]] *= 0.1
             s[IDX["ground"]] *= 1.5
             s[IDX["road"]] *= 1.3
             s[IDX["sidewalk"]] *= 1.3
@@ -146,66 +163,37 @@ def _apply_geom_prior(seg: Segment, scores: np.ndarray,
         # Sloped planes (roof) — verticality 0.3–0.6
         if 0.3 <= f.verticality <= 0.6:
             if f.planarity > 0.3 and horiz_extent > 1.5:
-                s[IDX["building"]] *= 3.0
-                s[IDX["fence"]] *= 0.2
-                s[IDX["ground"]] *= 0.1
-
-        # Tiny planes
-        if max(f.extent) < 0.4:
-            s[IDX["building"]] *= 0.1
-            s[IDX["fence"]] *= 0.3
-
-    # ── Ground-origin segments ──────────────────────────────────────
-    if seg.kind == "ground":
-        # Ground extraction can mis-capture vertical surfaces.
-        # Only apply strong ground prior if the segment is actually flat.
-        if f.verticality < 0.3 and f.height_range < 2.0:
-            # Genuinely flat ground
-            s[IDX["ground"]] *= 3.0
-            s[IDX["road"]] *= 1.5
-            s[IDX["sidewalk"]] *= 1.5
-            s[IDX["building"]] *= 0.0
-            s[IDX["fence"]] *= 0.0
-            s[IDX["vegetation"]] *= 0.3
-            s[IDX["vehicle"]] *= 0.0
-            s[IDX["unlabeled"]] *= 0.2
-        else:
-            # "Ground" segment that is actually vertical/tall → likely wall
-            s[IDX["ground"]] *= 0.5
-            if f.verticality > 0.4:
                 s[IDX["building"]] *= 2.0
-                s[IDX["ground"]] *= 0.1
+                s[IDX["fence"]] *= 0.3
+                s[IDX["ground"]] *= 0.2
+
+        # Tiny planes — don't trust shape
+        if max(f.extent) < 0.4:
+            s[IDX["building"]] *= 0.3
+            s[IDX["fence"]] *= 0.5
 
     # ── Clusters ────────────────────────────────────────────────────
     if seg.kind == "cluster":
 
-        # ---- VERTICAL clusters → building or fence ----
+        # ---- VERTICAL clusters ----
         if f.verticality > 0.4:
-            # Ground/road/sidewalk VETOED for any vertical cluster
-            s[IDX["ground"]] *= 0.02
-            s[IDX["road"]] *= 0.02
-            s[IDX["sidewalk"]] *= 0.02
+            # Suppress horizontal classes
+            s[IDX["ground"]] *= 0.1
+            s[IDX["road"]] *= 0.1
+            s[IDX["sidewalk"]] *= 0.1
 
-            # Large + planar → building wall
-            if f.planarity > 0.3 and horiz_extent > 1.0:
-                s[IDX["building"]] *= 4.0
-                s[IDX["vehicle"]] *= 0.1
-
-            # Large even with moderate planarity → building
-            if f.n_points > 200 and horiz_extent > 2.0:
+            # Large + planar → building wall (single boost, no stacking)
+            if f.planarity > 0.3 and (horiz_extent > 2.0 or f.n_points > 500):
                 s[IDX["building"]] *= 3.0
                 s[IDX["vehicle"]] *= 0.2
-
-            # Very large → almost certainly building
-            if f.n_points > 500 or horiz_extent > 3.0 or area_proxy > 4.0:
-                s[IDX["building"]] *= 3.0
-                s[IDX["vehicle"]] *= 0.05
-
-            # Tall (>2m height range) → building
-            if f.height_range > 2.0:
+            elif f.planarity > 0.3 and horiz_extent > 1.0:
                 s[IDX["building"]] *= 2.0
-                s[IDX["fence"]] *= 0.3
-                s[IDX["vehicle"]] *= 0.2
+                s[IDX["vehicle"]] *= 0.3
+
+            # Tall (>2.5m height range) → building rather than fence
+            if f.height_range > 2.5:
+                s[IDX["building"]] *= 1.5
+                s[IDX["fence"]] *= 0.4
 
             # Medium height, moderate size → fence
             if f.height_range < 2.0 and 0.5 < horiz_extent < 4.0 and f.planarity > 0.3:
@@ -213,11 +201,12 @@ def _apply_geom_prior(seg: Segment, scores: np.ndarray,
 
         # ---- HORIZONTAL clusters ----
         if f.verticality < 0.3:
-            # Flat cluster → ground/sidewalk fragment
+            # Flat cluster → ground/sidewalk fragment, not building
+            s[IDX["building"]] *= 0.3
+            s[IDX["vegetation"]] *= 1.3
             if f.height_range < 0.3:
                 s[IDX["ground"]] *= 1.5
                 s[IDX["sidewalk"]] *= 1.5
-                s[IDX["building"]] *= 0.0
 
         # ---- VEHICLE-like ----
         # Compact, non-planar, moderate size, low height range
@@ -227,27 +216,22 @@ def _apply_geom_prior(seg: Segment, scores: np.ndarray,
                 and 0.5 < min_horiz < 3.0
                 and 0.8 < f.height_range < 2.5
                 and f.n_points > 100):
-            s[IDX["vehicle"]] *= 3.0
-            s[IDX["building"]] *= 0.3
-            s[IDX["vegetation"]] *= 0.5
-            s[IDX["fence"]] *= 0.2
+            s[IDX["vehicle"]] *= 2.5
+            s[IDX["building"]] *= 0.4
+            s[IDX["vegetation"]] *= 0.6
+            s[IDX["fence"]] *= 0.3
 
         # ---- VEGETATION-like ----
         # Non-planar, spread → vegetation (not building!)
         if f.planarity < 0.3 and f.sphericity > 0.1:
-            s[IDX["vegetation"]] *= 2.5
-            s[IDX["building"]] *= 0.3
-            s[IDX["fence"]] *= 0.3
-
-        # Low verticality cluster → not a wall
-        if f.verticality < 0.3:
-            s[IDX["building"]] *= 0.3
-            s[IDX["vegetation"]] *= 1.5
+            s[IDX["vegetation"]] *= 2.0
+            s[IDX["building"]] *= 0.5
+            s[IDX["fence"]] *= 0.5
 
         # Short, compact blob → bush/vegetation
         if f.height_range < 0.5 and max(f.extent[:2]) < 1.0 and f.planarity < 0.3:
-            s[IDX["building"]] *= 0.0
-            s[IDX["fence"]] *= 0.0
+            s[IDX["building"]] *= 0.1
+            s[IDX["fence"]] *= 0.1
             s[IDX["vegetation"]] *= 1.5
 
     # ── Renormalize ─────────────────────────────────────────────────
